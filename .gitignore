@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-*/
+*.log
+npm-debug.log*
+.DS_Store
+.env
+.env.*
+
+# Local only: dev log and any data files (plans, logs, spreadsheets)
+docs/
+*.xlsx
+/day-plan*.json
+/day-log*.json
+/samples/
+**/day-plan*.json
+**/day-log*.json

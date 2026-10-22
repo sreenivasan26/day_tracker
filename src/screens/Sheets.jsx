@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { X, Check, Plus, Minus, ChevronDown, Clock, Trash2, Link2 } from 'lucide-react'
+import { X, Check, Plus, Minus, ChevronDown, Clock, Trash2, Link2, Repeat } from 'lucide-react'
 import { CATS, catLabel, catColor, clockOf, dayKey, dayStart, addDays, fmtMin, planMin, planEnd, toMin, hhmmOf, shortDay, totalMs, entStart, entEnd } from '../lib/dayStore.js'
 
 const MIN = 60000
@@ -137,6 +137,7 @@ export function ItemSheet({ item, entries, now, onClose, onPatch, onToggleDone, 
   const left = plan - total
   const [pstart, setS] = useState(hhmmOf(item.start))
   const [pend, setE] = useState(hhmmOf(planEnd(item)))
+  const [confirmDel, setConfirmDel] = useState(false)
   const bad = pstart && pend && toMin(pend) <= toMin(pstart)
   const commitPlan = (a, b) => { if (!(a && b && toMin(b) <= toMin(a))) onPatch(planFromTimes(a, b)) }
   const sorted = [...entries].sort((a, b) => entStart(a) - entStart(b))
@@ -147,6 +148,7 @@ export function ItemSheet({ item, entries, now, onClose, onPatch, onToggleDone, 
         {started && <span>{plan ? `· planned ${fmtMin(plan)}` : ''}{item.start != null ? ` · starts ${hhmmOf(item.start)}` : ''}</span>}
         <span>· {shortDay(item.date)}</span>
         {item.added_on_phone && <span className="tag">Added on phone</span>}
+        {item.recurring_id && <span className="tag rpt"><Repeat size={13} className="ic" aria-hidden />Repeats daily</span>}
       </div>
       {item.task_title && <div className="mut" style={{ margin: '0 0 12px', display: 'flex', gap: 8, alignItems: 'center' }}><Link2 size={16} className="ic" aria-hidden />Task: {item.task_title}</div>}
       {!started && (
@@ -182,7 +184,16 @@ export function ItemSheet({ item, entries, now, onClose, onPatch, onToggleDone, 
       )}
       <button className="btn two" onClick={onAddTime}><Plus size={22} className="ic" />Add time manually</button>
       <button className="btn neutral" onClick={onToggleDone}><Check size={22} className="ic" />{item.done ? 'Mark not done' : 'Mark done (separate from the timer)'}</button>
-      <button className="btn dng" onClick={onDelete}><Trash2 size={20} className="ic" />Delete item</button>
+      <button className="btn dng" onClick={() => (item.recurring_id ? setConfirmDel(true) : onDelete())}><Trash2 size={20} className="ic" />Delete item</button>
+      {confirmDel && (
+        <div className="confirm" role="alertdialog" aria-label="Delete a repeating item" aria-describedby="cf-msg">
+          <p id="cf-msg"><b>This item repeats daily.</b> If you delete it here, it may come back on the web unless it is skipped there.</p>
+          <div className="two">
+            <button className="btn neutral" style={{ marginTop: 0 }} autoFocus onClick={() => setConfirmDel(false)}>Cancel</button>
+            <button className="btn dng" style={{ marginTop: 0 }} onClick={() => { setConfirmDel(false); onDelete() }}>Delete</button>
+          </div>
+        </div>
+      )}
     </SheetFrame>
   )
 }

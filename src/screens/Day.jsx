@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Play, Square, Plus, ChevronDown, ChevronRight, Link2, X, Clock, Check, Calendar, List, AlignCenter, TriangleAlert, ChevronUp, FileUp, Share2 } from 'lucide-react'
+import { Play, Square, Plus, ChevronDown, ChevronRight, Link2, X, Clock, Check, Calendar, List, AlignCenter, TriangleAlert, ChevronUp, FileUp, Share2, Repeat, Info } from 'lucide-react'
 import '../day.css'
 import {
   catLabel, catColor, catBg, loadDay, saveDay, clock, fmtMin, loggedOn, planMin, groupItems, dayTotals, isRunning, runningTimers, entriesOf,
   startTimer, stopTimer, addItem, patchItem, deleteItem, addEntry, updateEntry, deleteEntry, dayKey, longDay, shortDay, stamp,
-  timelineModel, T_START, T_END, HPX, yOf, blockPx, hhmmOf, mergePlan, buildLog, logFileName, markExported, exportStale,
+  timelineModel, T_START, T_END, HPX, yOf, blockPx, hhmmOf, mergePlan, buildLog, logFileName, markExported, exportStale, missedItem, planIsOld,
 } from '../lib/dayStore.js'
 import { AddItemSheet, AddTimeSheet, ItemSheet, DurText } from './Sheets.jsx'
 
@@ -31,7 +31,7 @@ function Hero({ t }) {
   )
 }
 
-function Row({ it, entries, now, dkey, onOpen, onDone, onToggle, running }) {
+function Row({ it, entries, now, dkey, onOpen, onDone, onToggle, running, missed }) {
   const run = running
   const logged = loggedOn(entries, dkey, now) / MIN
   const plan = planMin(it)
@@ -45,6 +45,8 @@ function Row({ it, entries, now, dkey, onOpen, onDone, onToggle, running }) {
           <span className="cn2"><i className="dot" style={{ background: catColor(it.cat) }} />{catLabel(it.cat)}</span>
           <span className="tm2">{fmtMin(logged)}{plan > 0 ? ` of ${fmtMin(plan)}` : ''}</span>
           {over && <span className="over"><TriangleAlert size={14} className="ic" aria-hidden />+{fmtMin(logged - plan)} over</span>}
+          {missed && <span className="miss"><TriangleAlert size={14} className="ic" aria-hidden />Missed</span>}
+          {it.recurring_id && <span className="rpt"><Repeat size={13} className="ic" aria-hidden />Repeats daily</span>}
         </span>
         {it.task_title && <span className="m tk"><Link2 size={13} className="ic" aria-hidden />{it.task_title}</span>}
         {plan > 0 && <span className="pg"><i className={over ? 'wn' : ''} style={{ width: `${Math.min(100, (logged / plan) * 100)}%`, background: catColor(it.cat) }} /></span>}
@@ -60,15 +62,18 @@ function Block({ b, kind, onOpen }) {
   const h = blockPx(b.e - b.s)
   const it = b.item
   const lab = fmtMin(kind === 'plan' ? it.plan : b.dur)
-  const meta = kind === 'plan' ? `${hhmmOf(it.start)} planned` : b.running ? `${hhmmOf(Math.floor(b.fullS))} to now` : `${hhmmOf(Math.floor(b.fullS))} to ${hhmmOf(Math.floor(b.fullE))}`
+  const missed = kind === 'plan' && b.missed
+  const meta = kind === 'plan' ? `${hhmmOf(it.start)} ${missed ? 'missed, not started' : 'planned'}` : b.running ? `${hhmmOf(Math.floor(b.fullS))} to now` : `${hhmmOf(Math.floor(b.fullS))} to ${hhmmOf(Math.floor(b.fullE))}`
   const aria = kind === 'plan'
-    ? `Planned: ${it.title}, ${catLabel(it.cat)}, ${hhmmOf(it.start)} for ${lab}`
+    ? `Planned: ${it.title}, ${catLabel(it.cat)}, ${hhmmOf(it.start)} for ${lab}${missed ? ', missed, not started' : ''}${it.recurring_id ? ', repeats daily' : ''}`
     : `Logged: ${it.title}, ${catLabel(it.cat)}, ${meta}, ${lab}${b.ov ? `, ${fmtMin(b.ov)} over plan` : ''}${b.running ? ', running' : ''}`
   const cols = b.cols
   return (
-    <button type="button" className={`blk ${kind === 'plan' ? 'pl' : 'lg'} ${b.running ? 'run' : ''} c${Math.min(cols, 3)} ${h >= 40 && cols === 1 ? 'tall' : ''}`} onClick={onOpen} aria-label={aria}
-      style={{ top: yOf(b.s), height: h, '--c': catColor(it.cat), '--bg': catBg(it.cat), left: `${(b.col * 100) / cols}%`, width: `calc(${100 / cols}% - 2px)` }}>
+    <button type="button" className={`blk ${kind === 'plan' ? 'pl' : 'lg'} ${b.running ? 'run' : ''} ${missed ? 'miss' : ''} c${Math.min(cols, 3)} ${h >= 40 && cols === 1 ? 'tall' : ''}`} onClick={onOpen} aria-label={aria}
+      style={{ top: yOf(b.s), height: h, '--c': missed ? 'var(--color-danger)' : catColor(it.cat), '--bg': catBg(it.cat), left: `${(b.col * 100) / cols}%`, width: `calc(${100 / cols}% - 2px)` }}>
+      {missed && cols < 3 && <TriangleAlert size={12} className="ic" aria-hidden />}
       <b>{it.title}</b>
+      {kind === 'plan' && it.recurring_id && cols === 1 && <Repeat size={12} className="ic rp" aria-hidden />}
       {cols < 3 && <u>{lab}</u>}
       {h >= 40 && cols === 1 && <span className="bm">{meta}</span>}
       {b.ov > 0 && <i className="ov" style={{ height: Math.min(h - 6, b.ov * HPX) }} />}
@@ -166,7 +171,7 @@ export default function Day() {
     try {
       const r = mergePlan(stRef.current, JSON.parse(await f.text()), Date.now())
       commit(r.state)
-      flash(setToast, `Plan loaded: ${r.added} added, ${r.updated} updated${r.removed ? `, ${r.removed} removed` : ''}`, 4000)
+      flash(setToast, `Plan loaded: ${r.added} added, ${r.updated} updated${r.removed ? `, ${r.removed} removed` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}${r.old ? '. This plan is more than a day old' : ''}`, r.skipped || r.old ? 6000 : 4000)
     } catch (e) {
       flash(setToast, e instanceof SyntaxError ? 'That file is not valid JSON.' : e.message, 4000)
     }
@@ -200,7 +205,8 @@ export default function Day() {
               <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={loadPlan} aria-label="Plan file" />
             </div>
             <p className="syncst">{st.planLoadedAt ? `Plan loaded ${stamp(st.planLoadedAt)}` : 'No plan loaded'} · {st.lastExportAt ? `Last export ${stamp(st.lastExportAt)}` : 'Never exported'}</p>
-            {stale && <div className="stale" role="status"><TriangleAlert size={16} className="ic" aria-hidden />Changes since the last export. Export before you finish.</div>}
+            {planIsOld(st, now) && <div className="oldplan" role="status"><TriangleAlert size={16} className="ic" aria-hidden />The loaded plan is more than a day old. Load a fresh plan from the website.</div>}
+            {stale && <div className="stale" role="status"><Info size={16} className="ic" aria-hidden />Changes since the last export. Export before you finish.</div>}
             <div className="seg tg" role="tablist" aria-label="View">
               <button role="tab" aria-selected={view === 'list'} className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><List size={20} className="ic" aria-hidden />List</button>
               <button role="tab" aria-selected={view === 'timeline'} className={view === 'timeline' ? 'on' : ''} onClick={() => setView('timeline')}><AlignCenter size={20} className="ic" aria-hidden />Timeline</button>
@@ -235,7 +241,7 @@ export default function Day() {
                       {!shut && (
                         <div className="glist">
                           {list.map((it) => (
-                            <Row key={it.id} it={it} entries={entriesOf(st, it.id)} running={isRunning(st, it.id)} now={now} dkey={key}
+                            <Row key={it.id} it={it} entries={entriesOf(st, it.id)} running={isRunning(st, it.id)} missed={missedItem(st, it, now)} now={now} dkey={key}
                               onOpen={() => setSheet({ type: 'item', id: it.id })}
                               onDone={() => commit(patchItem(st, it.id, { done: !it.done }))}
                               onToggle={() => toggleTimer(it)} />

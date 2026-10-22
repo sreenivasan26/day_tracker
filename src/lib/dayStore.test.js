@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   CATS, fmtMin, planMin, groupItems, dayTotals, addItem, patchItem, deleteItem, startTimer, stopTimer, runningCount, addEntry, updateEntry, deleteEntry,
-  entriesOf, loggedOn, timelineModel, layoutLane, yOf, blockPx, HPX, MIN_BLOCK_PX, mergePlan, buildLog, logFileName, markExported, exportStale, migrateOld, loadDay, blank, dayKey, dayStart, addDays,
+  entriesOf, loggedOn, timelineModel, layoutLane, yOf, blockPx, HPX, MIN_BLOCK_PX, mergePlan, buildLog, logFileName, markExported, exportStale, migrateOld, loadDay, blank, dayKey, dayStart, addDays, missedItem, planIsOld,
 } from './dayStore.js'
 
 const NOW = new Date(2026, 9, 21, 22, 5, 0).getTime() // Wed 21 Oct 2026 22:05
@@ -81,6 +81,53 @@ describe('Load plan merge rules', () => {
     expect(b.added + b.updated + b.removed).toBe(0); expect(b.state.items).toEqual(a.items); expect(b.state.entries).toEqual(a.entries)
     const c = mergePlan(deleteItem(a, U(2), NOW), p, NOW)
     expect(c.state.items.map((i) => i.id)).toEqual([U(1)])
+  })
+  it('D3 recurring_id updates from the web', () => {
+    const r = mergePlan(withItems([fi(1)]), plan([fi(1, { recurring_id: 'r1' })]), NOW)
+    expect(r.updated).toBe(1); expect(r.state.items[0].recurring_id).toBe('r1')
+  })
+  it('D4 counts items with an unknown category as skipped', () => {
+    const r = mergePlan(blank(), plan([fi(1), fi(2, { cat: 'admin' })]), NOW)
+    expect(r.added).toBe(1); expect(r.skipped).toBe(1)
+  })
+  it('D5 removal window follows the phone today; an old plan removes nothing and is flagged', () => {
+    const phoneNow = new Date(2026, 9, 23, 12, 0).getTime()
+    const D = '2026-10-23'
+    const st = withItems([fi(1), fi(3, { date: D })]) // item 1 (21 Oct) is outside yesterday..+2 of the phone's today
+    const r = mergePlan(st, plan([fi(9, { date: D })], [], '2026-10-23T11:00:00'), phoneNow)
+    expect(r.old).toBe(false); expect(r.removed).toBe(1); expect(r.state.items.map((i) => i.id).sort()).toEqual([U(1), U(9)].sort())
+    const o = mergePlan(st, plan([fi(9, { date: D })], [], '2026-10-21T22:00:00'), phoneNow)
+    expect(o.old).toBe(true); expect(o.removed).toBe(0); expect(o.state.planGeneratedAt).toBe(Date.parse('2026-10-21T22:00:00'))
+    expect(planIsOld(o.state, phoneNow)).toBe(true); expect(planIsOld(o.state, Date.parse('2026-10-22T10:00:00'))).toBe(false)
+  })
+  it('D6 web edit wins when newer; the phone keeps its later edit; web-deleted entries go', () => {
+    const base = mergePlan(blank(), plan([fi(1)], [fe(1, 1), fe(2, 1, { s: 700, e: 730, updated_at: '2026-10-21T22:00:00' }), fe(3, 1, { s: 800, e: 830 })]), NOW).state
+    const later = NOW + 60000 // 22:06
+    const st = updateEntry(base, U(102), { e: 760 }, later) // phone edit at 22:06
+    const p2 = plan([fi(1)], [fe(1, 1, { s: 545, e: 610, updated_at: '2026-10-21T22:30:00' }), fe(2, 1, { s: 700, e: 720, updated_at: '2026-10-21T22:03:00' })])
+    const r = mergePlan(st, p2, later + 1000)
+    const by = (id) => r.state.entries.find((e) => e.id === id)
+    expect(by(U(101))).toMatchObject({ s: 545, e: 610, updated_at: '2026-10-21T22:30:00' })
+    expect(by(U(102))).toMatchObject({ s: 700, e: 760 })
+    expect(by(U(103))).toBeUndefined()
+    expect(r.state.deleted_entry_ids).toEqual([])
+  })
+  it('D2 missed = today, scheduled, unstarted, not done, end passed', () => {
+    const it0 = fi(1, { start: 540, plan: 60 }) // 09:00-10:00, now 22:05
+    expect(missedItem(withItems([it0]), it0, NOW)).toBe(true)
+    expect(missedItem(withItems([{ ...it0, done: true }]), { ...it0, done: true }, NOW)).toBe(false)
+    expect(missedItem(withItems([it0], [fe(1, 1)]), it0, NOW)).toBe(false)
+    expect(missedItem(withItems([it0]), it0, new Date(2026, 9, 21, 9, 30).getTime())).toBe(false)
+    expect(missedItem(withItems([{ ...it0, start: null }]), { ...it0, start: null }, NOW)).toBe(false)
+    expect(missedItem(withItems([{ ...it0, date: addDays(KEY, 1) }]), { ...it0, date: addDays(KEY, 1) }, NOW)).toBe(false)
+    expect(timelineModel(withItems([it0]), KEY, NOW).plan[0].missed).toBe(true)
+  })
+  it('D6 never touches a running phone entry or a phone-created entry', () => {
+    const run = { id: U(150), item_id: U(1), date: KEY, s: 600, e: null, ts: NOW - 1000, source: 'phone', updated_at: '2026-10-21T10:00:00' }
+    const st = { ...withItems([fi(1)], [run, fe(1, 1)]), planLoadedAt: NOW - 3600000 }
+    const r = mergePlan(st, plan([fi(1)], [{ ...run, s: 1, e: 5, updated_at: '2026-10-21T23:00:00' }]), NOW)
+    expect(r.state.entries.find((e) => e.id === U(150))).toMatchObject({ e: null, s: 600 })
+    expect(r.state.entries.find((e) => e.id === U(101))).toBeUndefined() // web entry absent from the file is removed
   })
   it('rejects other files', () => {
     expect(() => mergePlan(blank(), { format: 'nt-day-log', version: 1 }, NOW)).toThrow(/not a Day plan/)

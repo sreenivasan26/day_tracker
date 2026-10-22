@@ -42,7 +42,7 @@ export const toMin = (t) => { const m = /^(\d{1,2}):(\d{2})$/.exec(t || ''); ret
 export const hhmmOf = (m) => (m == null ? '' : `${p2(Math.floor(m / 60))}:${p2(m % 60)}`)
 
 /* ---------- state ---------- */
-export const blank = () => ({ v: 2, items: [], entries: [], deleted_item_ids: [], deleted_entry_ids: [], planLoadedAt: null, lastExportAt: null, lastChangeAt: null, lastCat: 'work' })
+export const blank = () => ({ v: 2, items: [], entries: [], deleted_item_ids: [], deleted_entry_ids: [], planLoadedAt: null, planGeneratedAt: null, lastExportAt: null, lastChangeAt: null, lastCat: 'work' })
 const touch = (st, now) => ({ ...st, lastChangeAt: now })
 
 export const entriesOf = (st, itemId) => st.entries.filter((e) => e.item_id === itemId)
@@ -60,6 +60,10 @@ const overlap = (en, now, d0, d1) => Math.max(0, Math.min(entEnd(en, now), d1) -
 export const loggedOn = (entries, key, now) => { const d0 = dayStart(key), d1 = dayStart(addDays(key, 1)); return entries.reduce((s, e) => s + overlap(e, now, d0, d1), 0) }
 export const totalMs = (entries, now) => entries.reduce((s, e) => s + Math.max(0, entEnd(e, now) - entStart(e)), 0)
 export const itemsOn = (st, key) => st.items.filter((i) => i.date === key)
+// Same rule as web missedItem: today, scheduled (start + plan), not done, never started, planned end already passed.
+export const missedItem = (st, it, now) =>
+  it.date === dayKey(now) && !it.done && it.start != null && it.plan > 0 && !st.entries.some((e) => e.item_id === it.id) &&
+  it.start + it.plan < Math.floor((now - dayStart(dayKey(now))) / MIN)
 
 /* ---------- mutations (pure: return a new state) ---------- */
 export const addItem = (st, { title, cat, date, plan = null, start = null, added_on_phone = true }, now = Date.now()) => {
@@ -160,7 +164,7 @@ export function timelineModel(st, key, now) {
   for (const it of itemsOn(st, key)) {
     if (it.plan > 0 && it.start != null) {
       const { vs, ve } = clamp(it.start, it.start + it.plan)
-      if (ve > vs) plan.push({ key: `p${it.id}`, item: it, s: vs, e: ve, fullS: it.start, fullE: it.start + it.plan })
+      if (ve > vs) plan.push({ key: `p${it.id}`, item: it, s: vs, e: ve, fullS: it.start, fullE: it.start + it.plan, missed: missedItem(st, it, now) })
     }
   }
   const ents = st.entries.filter((e) => Math.min(entEnd(e, now), d1) > Math.max(entStart(e), d0) || (e.e == null && e.date === key))
@@ -193,7 +197,11 @@ export function timelineModel(st, key, now) {
 }
 
 /* ---------- Load plan (web -> phone) ---------- */
-const WEB_FIELDS = ['date', 'cat', 'title', 'plan', 'start', 'task_id', 'task_title']
+const WEB_FIELDS = ['date', 'cat', 'title', 'plan', 'start', 'task_id', 'task_title', 'recurring_id']
+export const PLAN_OLD_MS = 24 * 3600 * 1000
+// epoch ms of an ISO string (no offset = local) or epoch s/ms; NaN when unknown
+const tms = (v) => (typeof v === 'number' ? (v < 1e12 ? v * 1000 : v) : typeof v === 'string' ? Date.parse(v) : NaN)
+export const planIsOld = (st, now) => !!st.planGeneratedAt && now - st.planGeneratedAt > PLAN_OLD_MS
 const validItem = (i) => i && typeof i.id === 'string' && typeof i.title === 'string' && CATS.includes(i.cat) && /^\d{4}-\d{2}-\d{2}$/.test(i.date || '')
 const validEntry = (e) => e && typeof e.id === 'string' && typeof e.item_id === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date || '') && Number.isInteger(e.s) && (e.e == null || (Number.isInteger(e.e) && e.e > e.s))
 
@@ -201,7 +209,10 @@ const validEntry = (e) => e && typeof e.id === 'string' && typeof e.item_id === 
 export function mergePlan(st, file, now = Date.now()) {
   if (!file || file.format !== 'nt-day-plan' || file.version !== 1 || !Array.isArray(file.items) || !Array.isArray(file.entries)) throw new Error('This is not a Day plan file (day-plan.json).')
   const gen = Date.parse(file.generated_at) || now
-  const from = addDays(dayKey(gen), -1), to = addDays(dayKey(gen), 2)
+  // removal window = the phone's own today (yesterday..today+2); an old plan (> 1 day) never removes anything
+  const from = addDays(dayKey(now), -1), to = addDays(dayKey(now), 2)
+  const old = now - gen > PLAN_OLD_MS
+  const skipped = file.items.filter((i) => !validItem(i)).length
   const inFile = new Set(file.items.map((i) => i.id))
   const gone = new Set(st.deleted_item_ids), goneE = new Set(st.deleted_entry_ids)
   let added = 0, updated = 0, removed = 0
@@ -222,15 +233,33 @@ export function mergePlan(st, file, now = Date.now()) {
   }
   const hasEntries = new Set(st.entries.map((e) => e.item_id))
   items = items.filter((it) => {
-    if (inFile.has(it.id) || hasEntries.has(it.id) || it.added_on_phone || it.date < from || it.date > to) return true
+    if (old || inFile.has(it.id) || hasEntries.has(it.id) || it.added_on_phone || it.date < from || it.date > to) return true
     removed++
     return false
   })
   const ids = new Set(items.map((i) => i.id))
+  const fileEntries = new Map(file.entries.filter((e) => e && typeof e.id === 'string').map((e) => [e.id, e]))
+  // D6: web edits win when the web entry is strictly newer and the phone entry is not running; web-deleted entries
+  // (source web, item still in the file, absent from it) go unless edited on the phone since the last load.
+  const lastLoad = st.planLoadedAt
+  let entries = []
+  for (const en of st.entries) {
+    const f = fileEntries.get(en.id)
+    if (f) {
+      if (en.e != null && validEntry(f) && tms(f.updated_at) > tms(en.updated_at)) {
+        updated++
+        entries.push({ ...en, date: f.date, s: f.s, e: f.e, ts: f.ts ?? null, updated_at: f.updated_at })
+        continue
+      }
+    } else if (!old && lastLoad && en.source === 'web' && en.e != null && inFile.has(en.item_id) && !(tms(en.updated_at) > lastLoad)) {
+      removed++
+      continue
+    }
+    entries.push(en)
+  }
   const eHave = new Set(st.entries.map((e) => e.id))
-  const entries = [...st.entries]
   for (const e of file.entries) if (validEntry(e) && ids.has(e.item_id) && !eHave.has(e.id) && !goneE.has(e.id)) entries.push({ ts: null, source: 'web', updated_at: isoLocal(now), ...e })
-  return { state: { ...st, items, entries, planLoadedAt: now }, added, updated, removed }
+  return { state: { ...st, items, entries, planLoadedAt: now, planGeneratedAt: gen }, added, updated, removed, skipped, old }
 }
 
 /* ---------- Export log (phone -> web) ---------- */
